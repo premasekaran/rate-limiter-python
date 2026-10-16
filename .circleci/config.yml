@@ -1,4 +1,5 @@
-﻿version: 2.1
+﻿
+version: 2.1
 
 jobs:
   test:
@@ -7,49 +8,41 @@ jobs:
         environment:
           DATABASE_URL: postgresql://rateuser:ratepassword@localhost:5432/ratelimiter
           REDIS_URL: redis://localhost:6379/0
-      - image: cimg/postgres:16.6
+      - image: postgres:16.6
         environment:
           POSTGRES_DB: ratelimiter
           POSTGRES_USER: rateuser
           POSTGRES_PASSWORD: ratepassword
-      - image: cimg/redis:7.4
+      - image: redis:7.4
+
     steps:
       - checkout
+
       - run:
           name: Install dependencies
           command: |
             python -m pip install --upgrade pip
             pip install -r requirements.txt -r requirements-dev.txt
+
       - run:
           name: Wait for PostgreSQL
           command: |
-            for i in $(seq 1 30); do
-              if pg_isready -h localhost -U rateuser -d ratelimiter; then
-                break
-              fi
-              sleep 2
-            done
-            pg_isready -h localhost -U rateuser -d ratelimiter
+            python -c "import os,time,psycopg; u=os.environ['DATABASE_URL']; exec('for i in range(30):\n try:\n  c=psycopg.connect(u,connect_timeout=3); c.close(); print(\"PostgreSQL is ready\"); break\n except psycopg.OperationalError:\n  if i==29: raise\n  time.sleep(2)')"
+
       - run:
           name: Wait for Redis
           command: |
-            python -c "import redis,time; r=redis.Redis.from_url('redis://localhost:6379/0'); [r.ping() or time.sleep(1) for _ in range(1)]"
+            python -c "import time,redis; r=redis.Redis.from_url('redis://localhost:6379/0'); exec('for i in range(30):\n try:\n  r.ping(); print(\"Redis is ready\"); break\n except redis.RedisError:\n  if i==29: raise\n  time.sleep(2)')"
+
       - run:
           name: Apply database migrations
           command: |
-            python - <<'PY'
-            import os
-            from pathlib import Path
-            import psycopg
+            python -c "import os; from pathlib import Path; import psycopg; c=psycopg.connect(os.environ['DATABASE_URL'],autocommit=True); [c.execute(p.read_text(encoding='utf-8')) for p in sorted(Path('migrations').glob('*.sql'))]; c.close()"
 
-            with psycopg.connect(os.environ["DATABASE_URL"], autocommit=True) as conn:
-                for path in sorted(Path("migrations").glob("*.sql")):
-                    conn.execute(path.read_text(encoding="utf-8"))
-                    print(f"Applied {path}")
-            PY
       - run:
           name: Ruff lint
           command: ruff check app tests
+
       - run:
           name: Unit tests and coverage
           command: |
@@ -57,15 +50,10 @@ jobs:
               --cov=app.buckets \
               --cov-report=term-missing \
               --cov-fail-under=70
+
       - run:
           name: Integration tests
-          command: |
-            if [ -d tests/integration ]; then
-              python -m pytest tests/integration -v
-            else
-              echo "Integration tests are not yet present."
-              exit 1
-            fi
+          command: python -m pytest tests/integration -v
 
   secret-scan:
     docker:
@@ -75,8 +63,7 @@ jobs:
       - run:
           name: Install Gitleaks
           command: |
-            curl -sSfL https://github.com/gitleaks/gitleaks/releases/download/v8.24.2/gitleaks_8.24.2_linux_x64.tar.gz \
-              -o /tmp/gitleaks.tar.gz
+            curl -sSfL https://github.com/gitleaks/gitleaks/releases/download/v8.24.2/gitleaks_8.24.2_linux_x64.tar.gz -o /tmp/gitleaks.tar.gz
             tar -xzf /tmp/gitleaks.tar.gz -C /tmp gitleaks
             sudo install /tmp/gitleaks /usr/local/bin/gitleaks
       - run:
@@ -97,7 +84,7 @@ jobs:
               main) ENV_TAG=qa ;;
               staging) ENV_TAG=stage ;;
               prod) ENV_TAG=prod ;;
-              *) echo "No image publishing for branch $CIRCLE_BRANCH"; exit 0 ;;
+              *) echo "No image publishing for branch $CIRCLE_BRANCH"; exit 1 ;;
             esac
             echo "export ENV_TAG=$ENV_TAG" >> "$BASH_ENV"
             echo "export SHORT_SHA=$SHORT_SHA" >> "$BASH_ENV"
@@ -110,8 +97,7 @@ jobs:
           name: Build and push image tags
           command: |
             IMAGE="$DOCKERHUB_USER/rate-limiter-python"
-            docker build -t "$IMAGE:$ENV_TAG" \
-              -t "$IMAGE:$ENV_TAG-$SHORT_SHA" .
+            docker build -t "$IMAGE:$ENV_TAG" -t "$IMAGE:$ENV_TAG-$SHORT_SHA" .
             docker push "$IMAGE:$ENV_TAG"
             docker push "$IMAGE:$ENV_TAG-$SHORT_SHA"
 
