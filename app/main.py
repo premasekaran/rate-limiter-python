@@ -202,3 +202,8 @@ def explain_boundary(limit: int = 5):
             "sliding_window_would_allow": limit,
             "note": "Both halves sit inside one 60s span, yet a fixed window"
                     " sees two different windows and lets all of them through."}
+
+@app.get("/version")
+def version():
+    """Return the API service version for deployment verification."""
+    return {"service": "api-gateway", "version": "1.0.1"}
