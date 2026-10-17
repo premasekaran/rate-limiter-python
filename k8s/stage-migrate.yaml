@@ -1,0 +1,51 @@
+
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: rate-limiter-migrate-stage
+  namespace: stage
+spec:
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+        app: rate-limiter-migrate-stage
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: migrate
+          image: postgres:16.6
+          env:
+            - name: PGHOST
+              value: db
+            - name: PGPORT
+              value: "5432"
+            - name: PGDATABASE
+              value: ratelimiter
+            - name: PGUSER
+              valueFrom:
+                secretKeyRef:
+                  name: db-credentials
+                  key: username
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: db-credentials
+                  key: password
+          command:
+            - /bin/sh
+            - -c
+            - |
+              until pg_isready -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$PGDATABASE"; do
+                echo "Waiting for PostgreSQL..."
+                sleep 2
+              done
+              psql -v ON_ERROR_STOP=1 -f /migrations/001_schema.sql
+              psql -v ON_ERROR_STOP=1 -f /migrations/002_seed.sql
+          volumeMounts:
+            - name: migrations
+              mountPath: /migrations
+      volumes:
+        - name: migrations
+          configMap:
+            name: rate-limiter-migrations-stage
