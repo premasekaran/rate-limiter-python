@@ -43,9 +43,9 @@ GET  /api/{resource}                 the gated call. Header: X-API-Key
                                      resources: time, quote, echo
 GET  /usage/{api_key}                counts by status, and the last ten calls
 GET  /explain/boundary?limit=5       the fixed-window flaw, as numbers
-
+API_KEY="YOUR_API_KEY_HERE"
 Try it:  for i in $(seq 1 8); do curl -s -o /dev/null -w "%{http_code} " \
-           -H 'X-API-Key: k_demo_free' localhost:8080/api/time; done; echo
+           -H 'X-API-Key: ${API_KEY}" localhost:8080/api/time; done; echo
 ```
 
 `/health` reports Postgres and Redis **separately**. If it says
