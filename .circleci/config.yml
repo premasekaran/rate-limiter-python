@@ -1,0 +1,132 @@
+﻿
+version: 2.1
+
+jobs:
+  test:
+    docker:
+      - image: cimg/python:3.12
+        environment:
+          DATABASE_URL: postgresql://rateuser:ratepassword@localhost:5432/ratelimiter
+          REDIS_URL: redis://localhost:6379/0
+      - image: postgres:16.6
+        environment:
+          POSTGRES_DB: ratelimiter
+          POSTGRES_USER: rateuser
+          POSTGRES_PASSWORD: ratepassword
+      - image: redis:7.4
+
+    steps:
+      - checkout
+
+      - run:
+          name: Install dependencies
+          command: |
+            python -m pip install --upgrade pip
+            pip install -r requirements.txt -r requirements-dev.txt
+
+      - run:
+          name: Wait for PostgreSQL
+          command: |
+            python -c "import os,time,psycopg; u=os.environ['DATABASE_URL']; exec('for i in range(30):\n try:\n  c=psycopg.connect(u,connect_timeout=3); c.close(); print(\"PostgreSQL is ready\"); break\n except psycopg.OperationalError:\n  if i==29: raise\n  time.sleep(2)')"
+
+      - run:
+          name: Wait for Redis
+          command: |
+            python -c "import time,redis; r=redis.Redis.from_url('redis://localhost:6379/0'); exec('for i in range(30):\n try:\n  r.ping(); print(\"Redis is ready\"); break\n except redis.RedisError:\n  if i==29: raise\n  time.sleep(2)')"
+
+      - run:
+          name: Apply database migrations
+          command: |
+            python -c "import os; from pathlib import Path; import psycopg; c=psycopg.connect(os.environ['DATABASE_URL'],autocommit=True); [c.execute(p.read_text(encoding='utf-8')) for p in sorted(Path('migrations').glob('*.sql'))]; c.close()"
+
+      - run:
+          name: Ruff lint
+          command: ruff check app tests
+
+      - run:
+          name: Unit tests and coverage
+          command: |
+            python -m pytest tests/test_buckets.py \
+              --cov=app.buckets \
+              --cov-report=term-missing \
+              --cov-fail-under=70
+
+      - run:
+          name: Integration tests
+          command: python -m pytest tests/integration -v
+
+  secret-scan:
+    docker:
+      - image: cimg/base:stable
+    steps:
+      - checkout
+      - run:
+          name: Install Gitleaks
+          command: |
+            curl -sSfL https://github.com/gitleaks/gitleaks/releases/download/v8.24.2/gitleaks_8.24.2_linux_x64.tar.gz -o /tmp/gitleaks.tar.gz
+            tar -xzf /tmp/gitleaks.tar.gz -C /tmp gitleaks
+            sudo install /tmp/gitleaks /usr/local/bin/gitleaks
+      - run:
+          name: Scan repository for secrets
+          command: gitleaks detect --source . --no-git --redact --exit-code 1
+
+  build-push:
+    docker:
+      - image: cimg/base:stable
+    steps:
+      - checkout
+      - setup_remote_docker
+      - run:
+          name: Set image tags
+          command: |
+            SHORT_SHA=$(git rev-parse --short HEAD)
+            case "$CIRCLE_BRANCH" in
+              main) ENV_TAG=qa ;;
+              staging) ENV_TAG=stage ;;
+              prod) ENV_TAG=prod ;;
+              *) echo "No image publishing for branch $CIRCLE_BRANCH"; exit 1 ;;
+            esac
+            echo "export ENV_TAG=$ENV_TAG" >> "$BASH_ENV"
+            echo "export SHORT_SHA=$SHORT_SHA" >> "$BASH_ENV"
+      - run:
+          name: Log in to Docker Hub
+          command: |
+            echo "$DOCKERHUB_TOKEN" | docker login \
+              --username "$DOCKERHUB_USER" --password-stdin
+      - run:
+          name: Build and push image tags
+          command: |
+            IMAGE="$DOCKERHUB_USER/rate-limiter-python"
+            docker build -t "$IMAGE:$ENV_TAG" -t "$IMAGE:$ENV_TAG-$SHORT_SHA" .
+            docker push "$IMAGE:$ENV_TAG"
+            docker push "$IMAGE:$ENV_TAG-$SHORT_SHA"
+
+workflows:
+  validate-and-publish:
+    jobs:
+      - test:
+          filters:
+            branches:
+              only:
+                - main
+                - staging
+                - prod
+                - feature/circleci-pipeline
+      - secret-scan:
+          filters:
+            branches:
+              only:
+                - main
+                - staging
+                - prod
+                - feature/circleci-pipeline
+      - build-push:
+          requires:
+            - test
+            - secret-scan
+          filters:
+            branches:
+              only:
+                - main
+                - staging
+                - prod
